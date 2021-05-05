@@ -82,6 +82,9 @@ pub fn (mut p Preferences) fill_with_defaults() {
 	}
 	rpath_name := os.file_name(rpath)
 	p.building_v = !p.is_repl && (rpath_name == 'v' || rpath_name == 'vfmt.v')
+	if p.building_v {
+		p.prealloc = true
+	}
 	if p.os == ._auto {
 		// No OS specifed? Use current system
 		p.os = get_host_os()
