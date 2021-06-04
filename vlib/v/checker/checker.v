@@ -4993,7 +4993,7 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 					mut enum_val := 0
 					if enum_decl.name == to_type_sym.name {
 						mut in_range := false
-						
+
 						for enum_field in enum_decl.fields {
 							// check if the field of the enum value is an integer literal
 							if enum_field.expr is ast.IntegerLiteral {
@@ -5004,12 +5004,13 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 								in_range = true
 								break
 							}
-							
+
 							enum_val += 1
 						}
 
 						if !in_range {
-							c.warn('$node_val dose not represents a value of enum $enum_typ_name', node.pos)
+							c.warn('$node_val dose not represents a value of enum $enum_typ_name',
+								node.pos)
 						}
 					}
 				}
