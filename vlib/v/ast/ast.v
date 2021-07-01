@@ -1588,6 +1588,21 @@ pub fn (expr Expr) is_expr() bool {
 	return true
 }
 
+pub fn (expr Expr) is_literal() bool {
+	match expr {
+		StringLiteral, StringInterLiteral, IntegerLiteral, FloatLiteral, BoolLiteral, CharLiteral,
+		ArrayInit {
+			return true
+		}
+		PrefixExpr {
+			return expr.right.is_literal()
+		}
+		else {
+			return false
+		}
+	}
+}
+
 pub fn (expr Expr) is_lit() bool {
 	return match expr {
 		BoolLiteral, CharLiteral, StringLiteral, IntegerLiteral { true }

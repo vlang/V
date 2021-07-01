@@ -443,11 +443,11 @@ pub fn (t &Table) resolve_common_sumtype_fields(sym_ &TypeSymbol) {
 		mut v_sym := t.get_type_symbol(variant)
 		fields := match mut v_sym.info {
 			Struct {
-				v_sym.info.fields
+				v_sym.info.fields.clone()
 			}
 			SumType {
 				t.resolve_common_sumtype_fields(v_sym)
-				v_sym.info.fields
+				v_sym.info.fields.clone()
 			}
 			else {
 				[]StructField{}
@@ -983,7 +983,7 @@ pub fn (t &Table) mktyp(typ Type) Type {
 }
 
 pub fn (mut t Table) register_fn_concrete_types(fn_name string, types []Type) bool {
-	mut a := t.fn_generic_types[fn_name]
+	mut a := t.fn_generic_types[fn_name].clone()
 	if types in a {
 		return false
 	}
@@ -1128,9 +1128,9 @@ fn (mut table Table) does_type_implement_interface(typ Type, inter_typ Type) boo
 		}
 	}
 	imethods := if inter_sym.kind == .interface_ {
-		(inter_sym.info as Interface).methods
+		(inter_sym.info as Interface).methods.clone()
 	} else {
-		inter_sym.methods
+		inter_sym.methods.clone()
 	}
 	for imethod in imethods {
 		if method := typ_sym.find_method(imethod.name) {
@@ -1356,9 +1356,9 @@ pub fn (mut table Table) type_implements_interface(utyp Type, interface_type Typ
 		// pos)
 	}
 	imethods := if inter_sym.kind == .interface_ {
-		(inter_sym.info as Interface).methods
+		(inter_sym.info as Interface).methods.clone()
 	} else {
-		inter_sym.methods
+		inter_sym.methods.clone()
 	}
 	// Verify methods
 	for imethod in imethods {

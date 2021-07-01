@@ -278,7 +278,7 @@ pub fn (mut g JsGen) find_class_methods(stmts []ast.Stmt) {
 					// Found struct method, store it to be generated along with the class.
 					mut class_name := g.table.get_type_name(stmt.receiver.typ)
 					// Workaround until `map[key] << val` works.
-					mut arr := g.method_fn_decls[class_name]
+					mut arr := g.method_fn_decls[class_name].clone()
 					arr << stmt
 					g.method_fn_decls[class_name] = arr
 				}
@@ -936,9 +936,9 @@ fn (mut g JsGen) gen_method_decl(it ast.FnDecl) {
 			g.push_pub_var(name)
 		}
 	}
-	mut args := it.params
+	mut args := it.params.clone()
 	if it.is_method {
-		args = args[1..]
+		args = args[1..].clone()
 	}
 	g.fn_args(args, it.is_variadic)
 	if it.is_method {
@@ -1170,7 +1170,7 @@ fn (mut g JsGen) gen_struct_decl(node ast.StructDecl) {
 		etyp := g.typ(embed.typ)
 		g.writeln('...${etyp}.prototype,')
 	}
-	fns := g.method_fn_decls[name]
+	fns := g.method_fn_decls[name].clone()
 	for field in node.fields {
 		typ := g.typ(field.typ)
 		g.doc.gen_typ(typ)

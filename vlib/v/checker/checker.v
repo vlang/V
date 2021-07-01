@@ -401,7 +401,7 @@ pub fn (mut c Checker) expand_iface_embeds(idecl &ast.InterfaceDecl, level int, 
 	mut ares := []ast.InterfaceEmbedding{}
 	for ie in iface_embeds {
 		if iface_decl := c.table.interfaces[ie.typ] {
-			mut list := iface_decl.ifaces
+			mut list := iface_decl.ifaces.clone()
 			if !iface_decl.are_ifaces_expanded {
 				list = c.expand_iface_embeds(idecl, level + 1, iface_decl.ifaces)
 				c.table.interfaces[ie.typ].ifaces = list
@@ -1434,6 +1434,135 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	return if node.op.is_relational() { ast.bool_type } else { return_type }
 }
 
+fn (mut c Checker) is_immutable(expr ast.Expr, i int) bool {
+	match expr {
+		ast.CastExpr {
+			// TODO
+			return false
+		}
+		ast.ComptimeSelector {
+			return false
+		}
+		ast.Ident {
+			if expr.obj is ast.Var {
+				if expr.obj.is_mut {
+					return false
+				}
+			}
+			return !expr.is_mut
+		}
+		ast.IndexExpr {
+			return true
+		}
+		ast.ParExpr {
+			return c.is_immutable(expr.expr, i)
+		}
+		ast.PrefixExpr {
+			return c.is_immutable(expr.right, i)
+		}
+		ast.SelectorExpr {
+			if expr.expr_type == 0 {
+				return false
+			}
+			// retrieve ast.Field
+			mut typ_sym := c.table.get_final_type_symbol(c.unwrap_generic(expr.expr_type))
+			match typ_sym.kind {
+				.struct_ {
+					// get the field info (e.g. `mut: `)
+					struct_info := typ_sym.info as ast.Struct
+					mut has_field := true
+					mut field_info := struct_info.find_field(expr.field_name) or {
+						has_field = false
+						ast.StructField{}
+					}
+					if !has_field {
+						for embed in struct_info.embeds {
+							embed_sym := c.table.get_type_symbol(embed)
+							embed_struct_info := embed_sym.info as ast.Struct
+							if embed_field_info := embed_struct_info.find_field(expr.field_name) {
+								has_field = true
+								field_info = embed_field_info
+								break
+							}
+						}
+					}
+					if !has_field {
+						type_str := c.table.type_to_str(expr.expr_type)
+						c.error('unknown field `${type_str}.$expr.field_name`', expr.pos)
+						return false
+					}
+					// check it
+					if !field_info.typ.has_flag(.shared_f) && c.is_immutable(expr.expr, i) {
+						return true
+					}
+					return !field_info.is_mut
+				}
+				.interface_ {
+					interface_info := typ_sym.info as ast.Interface
+					mut field_info := interface_info.find_field(expr.field_name) or { return false }
+					if !field_info.is_mut {
+						return true
+					}
+					return c.is_immutable(expr.expr, i)
+				}
+				.array, .string {
+					// This should only happen in `builtin`
+					if c.file.mod.name != 'builtin' {
+						return true
+					}
+					return c.is_immutable(expr.expr, i)
+				}
+				.aggregate {
+					return c.is_immutable(expr.expr, i)
+				}
+				else {
+					c.error('unexpected symbol `$typ_sym.kind`', expr.pos)
+					return false
+				}
+			}
+		}
+		ast.CallExpr {
+			return true
+		}
+		ast.ArrayInit {
+			return true
+		}
+		ast.StructInit {
+			return false
+		}
+		ast.IfExpr {
+			for branch in expr.branches {
+				if !c.is_immutable((branch.stmts.last() as ast.ExprStmt).expr, i) {
+					return false
+				}
+			}
+			return true
+		}
+		ast.MatchExpr {
+			for branch in expr.branches {
+				if !c.is_immutable((branch.stmts.last() as ast.ExprStmt).expr, i) {
+					return false
+				}
+			}
+			return true
+		}
+		ast.SqlExpr {
+			return true
+		}
+		ast.UnsafeExpr {
+			return true
+		}
+		ast.ConcatExpr {
+			return c.is_immutable(expr.vals[i], i)
+		}
+		else {
+			println('odd type: $expr.type_name()')
+			return false
+		}
+	}
+	return false
+}
+
 // returns name and position of variable that needs write lock
 // also sets `is_changed` to true (TODO update the name to reflect this?)
 fn (mut c Checker) fail_if_immutable(expr ast.Expr) (string, token.Position) {
@@ -1925,7 +2054,7 @@ pub fn (mut c Checker) method_call(mut call_expr ast.CallExpr) ast.Type {
 			c.error('expected $min_required_args arguments, but got $call_expr.args.len',
 				call_expr.pos)
 		} else if !method.is_variadic && call_expr.args.len > nr_args {
-			unexpected_arguments := call_expr.args[min_required_args..]
+			unexpected_arguments := call_expr.args[min_required_args..].clone()
 			unexpected_arguments_pos := unexpected_arguments[0].pos.extend(unexpected_arguments.last().pos)
 			c.error('expected $nr_args arguments, but got $call_expr.args.len', unexpected_arguments_pos)
 			return method.return_type
@@ -2065,7 +2194,7 @@ pub fn (mut c Checker) method_call(mut call_expr ast.CallExpr) ast.Type {
 		if method.generic_names.len != call_expr.concrete_types.len {
 			// no type arguments given in call, attempt implicit instantiation
 			c.infer_fn_generic_types(method, mut call_expr)
-			concrete_types = call_expr.concrete_types
+			concrete_types = call_expr.concrete_types.clone()
 		}
 		// resolve return generics struct to concrete type
 		if method.generic_names.len > 0 && method.return_type.has_flag(.generic) {
@@ -2485,7 +2614,7 @@ pub fn (mut c Checker) fn_call(mut call_expr ast.CallExpr) ast.Type {
 			c.error('expected $min_required_args arguments, but got $call_expr.args.len',
 				call_expr.pos)
 		} else if !func.is_variadic && call_expr.args.len > func.params.len {
-			unexpected_arguments := call_expr.args[min_required_args..]
+			unexpected_arguments := call_expr.args[min_required_args..].clone()
 			unexpected_arguments_pos := unexpected_arguments[0].pos.extend(unexpected_arguments.last().pos)
 			c.error('expected $min_required_args arguments, but got $call_expr.args.len',
 				unexpected_arguments_pos)
@@ -2635,7 +2764,7 @@ pub fn (mut c Checker) fn_call(mut call_expr ast.CallExpr) ast.Type {
 	if func.generic_names.len != call_expr.concrete_types.len {
 		// no type arguments given in call, attempt implicit instantiation
 		c.infer_fn_generic_types(func, mut call_expr)
-		concrete_types = call_expr.concrete_types
+		concrete_types = call_expr.concrete_types.clone()
 	}
 	if func.generic_names.len > 0 {
 		for i, call_arg in call_expr.args {
@@ -2752,9 +2881,9 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 			pos)
 	}
 	imethods := if inter_sym.kind == .interface_ {
-		(inter_sym.info as ast.Interface).methods
+		(inter_sym.info as ast.Interface).methods.clone()
 	} else {
-		inter_sym.methods
+		inter_sym.methods.clone()
 	}
 	// Verify methods
 	for imethod in imethods {
@@ -3087,7 +3216,7 @@ pub fn (mut c Checker) return_stmt(mut node ast.Return) {
 	exp_is_optional := expected_type.has_flag(.optional)
 	mut expected_types := [expected_type]
 	if expected_type_sym.info is ast.MultiReturn {
-		expected_types = expected_type_sym.info.types
+		expected_types = expected_type_sym.info.types.clone()
 		if c.table.cur_concrete_types.len > 0 {
 			expected_types = expected_types.map(c.unwrap_generic(it))
 		}
@@ -3582,15 +3711,24 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 		right_sym := c.table.get_type_symbol(right_type_unwrapped)
 		if c.pref.translated {
 			// TODO fix this in C2V instead, for example cast enums to int before using `|` on them.
-			// TODO replace all c.pref.translated checks with `$if !translated` for performance
 			continue
 		}
+
+        // Do not allow `a = b`, only `a = b.clone()`
 		if left_sym.kind == .array && !c.inside_unsafe && node.op in [.assign, .decl_assign]
 			&& right_sym.kind == .array && (left is ast.Ident && !left.is_blank_ident())
-			&& right is ast.Ident {
-			// Do not allow `a = b`, only `a = b.clone()`
-			c.error('use `array2 $node.op.str() array1.clone()` instead of `array2 $node.op.str() array1` (or use `unsafe`)',
-				node.pos)
+			&& right !is ast.ArrayInit && right !is ast.CallExpr && !right.is_literal() {
+			if right is ast.IndexExpr {
+				if !c.is_immutable(left, i) || !c.is_immutable(right.left, i) {
+					c.error('use `array2 $node.op.str() array1.clone()` instead of `array2 $node.op.str() array1` (or use `unsafe`)',
+						node.pos)
+				}
+			} else {
+				if !c.is_immutable(left, i) || !c.is_immutable(right, i) {
+					c.error('use `array2 $node.op.str() array1.clone()` instead of `array2 $node.op.str() array1` (or use `unsafe`)',
+						node.pos)
+				}
+			}
 		}
 		if left_sym.kind == .map && node.op in [.assign, .decl_assign] && right_sym.kind == .map
 			&& ((right is ast.Ident && right.is_auto_deref_var())
@@ -6901,6 +7039,7 @@ pub fn (mut c Checker) map_init(mut node ast.MapInit) ast.Type {
 		} else {
 			c.error('invalid empty map initilization syntax, use e.g. map[string]int{} instead',
 				node.pos)
+			return ast.void_type
 		}
 	}
 	// `x := map[string]string` - set in parser

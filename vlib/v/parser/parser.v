@@ -1729,7 +1729,7 @@ fn (mut p Parser) parse_multi_expr(is_top_level bool) ast.Stmt {
 	tok := p.tok
 	mut pos := tok.position()
 
-	mut defer_vars := p.defer_vars
+	mut defer_vars := p.defer_vars.clone()
 	p.defer_vars = []ast.Ident{}
 
 	left, left_comments := p.expr_list()
@@ -2577,7 +2577,7 @@ fn (mut p Parser) module_decl() ast.Module {
 	mut attrs_pos := p.tok.position()
 	if p.tok.kind == .lsbr {
 		p.attributes()
-		module_attrs = p.attrs
+		module_attrs = p.attrs.clone()
 	}
 	mut name := 'main'
 	is_skipped := p.tok.kind != .key_module
