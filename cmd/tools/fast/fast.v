@@ -38,7 +38,6 @@ fn main() {
 	if table.contains('>$commit<') {
 		println('nothing to benchmark')
 		exit(1)
-		return
 	}
 	// for i, commit in commits {
 	message := exec('git log --pretty=format:"%s" -n1 $commit')

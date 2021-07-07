@@ -68,20 +68,20 @@ mut:
 	file                   &ast.File
 	fn_decl                &ast.FnDecl // pointer to the FnDecl we are currently inside otherwise 0
 	last_fn_c_name         string
-	tmp_count              int      // counter for unique tmp vars (_tmp1, _tmp2 etc); resets at the start of each fn.
-	tmp_count2             int      // a separate tmp var counter for autofree fn calls
-	tmp_count_declarations int      // counter for unique tmp names (_d1, _d2 etc); does NOT reset, used for C declarations
-	is_assign_lhs          bool     // inside left part of assign expr (for array_set(), etc)
-	discard_or_result      bool     // do not safe last ExprStmt of `or` block in tmp variable to defer ongoing expr usage
-	is_void_expr_stmt      bool     // ExprStmt whos result is discarded
-	is_arraymap_set        bool     // map or array set value state
-	is_amp                 bool     // for `&Foo{}` to merge PrefixExpr `&` and StructInit `Foo{}`; also for `&byte(0)` etc
-	is_sql                 bool     // Inside `sql db{}` statement, generating sql instead of C (e.g. `and` instead of `&&` etc)
-	is_shared              bool     // for initialization of hidden mutex in `[rw]shared` literals
-	is_vlines_enabled      bool     // is it safe to generate #line directives when -g is passed
-	inside_cast_in_heap    int      // inside cast to interface type in heap (resolve recursive calls)
-	arraymap_set_pos       int      // map or array set value position
-	vlines_path            string   // set to the proper path for generating #line directives
+	tmp_count              int    // counter for unique tmp vars (_tmp1, _tmp2 etc); resets at the start of each fn.
+	tmp_count2             int    // a separate tmp var counter for autofree fn calls
+	tmp_count_declarations int    // counter for unique tmp names (_d1, _d2 etc); does NOT reset, used for C declarations
+	is_assign_lhs          bool   // inside left part of assign expr (for array_set(), etc)
+	discard_or_result      bool   // do not safe last ExprStmt of `or` block in tmp variable to defer ongoing expr usage
+	is_void_expr_stmt      bool   // ExprStmt whos result is discarded
+	is_arraymap_set        bool   // map or array set value state
+	is_amp                 bool   // for `&Foo{}` to merge PrefixExpr `&` and StructInit `Foo{}`; also for `&byte(0)` etc
+	is_sql                 bool   // Inside `sql db{}` statement, generating sql instead of C (e.g. `and` instead of `&&` etc)
+	is_shared              bool   // for initialization of hidden mutex in `[rw]shared` literals
+	is_vlines_enabled      bool   // is it safe to generate #line directives when -g is passed
+	inside_cast_in_heap    int    // inside cast to interface type in heap (resolve recursive calls)
+	arraymap_set_pos       int    // map or array set value position
+	vlines_path            string // set to the proper path for generating #line directives
 	optionals              map[string]string // to avoid duplicates
 	chan_pop_optionals     []string // types for `x := <-ch or {...}`
 	chan_push_optionals    []string // types for `ch <- x or {...}`
@@ -353,7 +353,17 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 			}
 		}
 
-        g.has_main = g.has_main || tg.has_main
+		g.threaded_fns << tg.threaded_fns
+		g.waiter_fns << tg.waiter_fns
+		g.array_fn_definitions << tg.array_fn_definitions
+		g.map_fn_definitions << tg.map_fn_definitions
+		g.struct_fn_definitions << tg.struct_fn_definitions
+		g.sumtype_fn_definitions << tg.sumtype_fn_definitions
+		g.alias_fn_definitions << tg.alias_fn_definitions
+		g.auto_fn_definitions << tg.auto_fn_definitions
+		g.anon_fn_definitions << tg.anon_fn_definitions
+
+		g.has_main = g.has_main || tg.has_main
 	}
 
 	g.write_optionals()
