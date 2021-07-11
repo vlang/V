@@ -106,7 +106,7 @@ fn (mut g Gen) infix_expr_eq_op(node ast.InfixExpr) {
 		&& left.sym.kind in [.array, .array_fixed, .alias, .map, .struct_, .sum_type] {
 		match left.sym.kind {
 			.alias {
-				ptr_typ := g.gen_alias_equality_fn(left.typ)
+				ptr_typ := g.equality_fn(left.typ)
 				if node.op == .ne {
 					g.write('!')
 				}
@@ -123,7 +123,7 @@ fn (mut g Gen) infix_expr_eq_op(node ast.InfixExpr) {
 				g.write(')')
 			}
 			.array {
-				ptr_typ := g.gen_array_equality_fn(left.unaliased.clear_flag(.shared_f))
+				ptr_typ := g.equality_fn(left.unaliased.clear_flag(.shared_f))
 				if node.op == .ne {
 					g.write('!')
 				}
@@ -154,7 +154,7 @@ fn (mut g Gen) infix_expr_eq_op(node ast.InfixExpr) {
 				g.write(')')
 			}
 			.array_fixed {
-				ptr_typ := g.gen_fixed_array_equality_fn(left.unaliased)
+				ptr_typ := g.equality_fn(left.unaliased)
 				if node.op == .ne {
 					g.write('!')
 				}
@@ -176,7 +176,7 @@ fn (mut g Gen) infix_expr_eq_op(node ast.InfixExpr) {
 				g.write(')')
 			}
 			.map {
-				ptr_typ := g.gen_map_equality_fn(left.unaliased)
+				ptr_typ := g.equality_fn(left.unaliased)
 				if node.op == .ne {
 					g.write('!')
 				}
@@ -193,7 +193,7 @@ fn (mut g Gen) infix_expr_eq_op(node ast.InfixExpr) {
 				g.write(')')
 			}
 			.struct_ {
-				ptr_typ := g.gen_struct_equality_fn(left.unaliased)
+				ptr_typ := g.equality_fn(left.unaliased)
 				if node.op == .ne {
 					g.write('!')
 				}
@@ -210,7 +210,7 @@ fn (mut g Gen) infix_expr_eq_op(node ast.InfixExpr) {
 				g.write(')')
 			}
 			.sum_type {
-				ptr_typ := g.gen_sumtype_equality_fn(left.unaliased)
+				ptr_typ := g.equality_fn(left.unaliased)
 				if node.op == .ne {
 					g.write('!')
 				}
@@ -372,7 +372,7 @@ fn (mut g Gen) infix_expr_in_optimization(left ast.Expr, right ast.ArrayInit) {
 		if is_str {
 			g.write('string__eq(')
 		} else if is_array {
-			ptr_typ := g.gen_array_equality_fn(right.elem_type)
+			ptr_typ := g.equality_fn(right.elem_type)
 			g.write('${ptr_typ}_arr_eq(')
 		}
 		g.expr(left)
