@@ -119,14 +119,15 @@ fn (mut g Gen) gen_str_default(sym ast.TypeSymbol, styp string, str_fn_name stri
 
 struct StrType {
 	is_optional bool
-	typ         ast.Type
 	fn_name     string
 	styp        string
+mut:
+	typ ast.Type
 }
 
 fn (mut g Gen) gen_str_for_type(typ ast.Type) string {
-	styp := g.typ(typ.set_nr_muls(0))
-	unwrapped := g.unwrap_generic(typ)
+	styp := g.typ(typ.idx())
+	unwrapped := g.unwrap_generic(typ.set_nr_muls(0))
 	mut sym := g.table.get_type_symbol(unwrapped)
 	mut str_fn_name := styp_to_str_fn_name(styp)
 	if mut sym.info is ast.Alias {

@@ -50,6 +50,8 @@ mut:
 	type_definitions       strings.Builder // typedefs, defines etc (everything that goes to the top of the file)
 	definitions            strings.Builder // typedefs, defines etc (everything that goes to the top of the file)
 	inits                  map[string]strings.Builder // contents of `void _vinit/2{}`
+	init                   strings.Builder
+	cleanup                strings.Builder
 	cleanups               map[string]strings.Builder // contents of `void _vcleanup(){}`
 	gowrappers             strings.Builder // all go callsite wrappers
 	stringliterals         strings.Builder // all string literals (they depend on tos3() beeing defined
@@ -244,7 +246,8 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		callback: fn (p &pool.PoolProcessor, idx int, wid int) &Gen {
 			file := p.get_item<&ast.File>(idx)
 			mut glob := &Gen(p.get_shared_context())
-			glob.timers.start('cgen_file $file.path')
+			mut local_timers := util.new_timers(glob.timers_should_print)
+			local_timers.start('cgen_file $file.path')
 			mut g := &Gen{
 				file: file
 				out: strings.new_builder(512000)
@@ -268,13 +271,15 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 				json_forward_decls: strings.new_builder(100)
 				enum_typedefs: strings.new_builder(100)
 				sql_buf: strings.new_builder(100)
+				init: strings.new_builder(100)
+				cleanup: strings.new_builder(100)
 				table: glob.table
 				pref: glob.pref
 				fn_decl: 0
 				is_autofree: true
 				indent: -1
 				module_built: glob.module_built
-				timers: util.new_timers(glob.timers_should_print)
+				timers: local_timers
 				inner_loop: &ast.EmptyStmt{}
 			}
 
@@ -307,7 +312,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 					}
 				}
 			}
-			glob.timers.show('cgen_file $file.path')
+			g.timers.show('cgen_file $file.path')
 			return g
 		}
 	)
@@ -318,19 +323,13 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	mut g := glob
 	g.timers.start('cgen unification')
 	for tg in pp.get_results<Gen>() {
-		g.out.write(tg.out) or { panic('') } // strings.Builder.write() never actually fails
+		g.out.write(tg.out) or { panic('') } // strings.Builder.write() never fails
 		g.cheaders.write(tg.cheaders) or { panic('') }
 		g.includes.write(tg.includes) or { panic('') }
 		g.typedefs.write(tg.typedefs) or { panic('') }
 		g.typedefs2.write(tg.typedefs2) or { panic('') }
 		g.type_definitions.write(tg.type_definitions) or { panic('') }
 		g.definitions.write(tg.definitions) or { panic('') }
-		for mod, init in tg.inits { // merge map
-			g.inits[mod].write(init) or { panic('') }
-		}
-		for mod, cleanup in tg.cleanups { // merge map
-			g.cleanups[mod].write(cleanup) or { panic('') }
-		}
 		g.gowrappers.write(tg.gowrappers) or { panic('') }
 		g.stringliterals.write(tg.stringliterals) or { panic('') }
 		g.auto_str_funcs.write(tg.auto_str_funcs) or { panic('') }
@@ -347,6 +346,9 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		g.enum_typedefs.write(tg.enum_typedefs) or { panic('') }
 		g.channel_definitions.write(tg.channel_definitions) or { panic('') }
 		g.sql_buf.write(tg.sql_buf) or { panic('') }
+
+		g.cleanups[tg.file.mod.name].write(tg.cleanup) or { panic('') } // strings.Builder.write never fails; it is like that in the source
+		g.inits[tg.file.mod.name].write(tg.init) or { panic('') }
 
 		g.threaded_fns << tg.threaded_fns
 		g.waiter_fns << tg.waiter_fns
@@ -370,7 +372,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 
 	g.write_optionals()
 	g.dump_expr_definitions() // this uses gen_str_for_type, so it has to go before the below for loop
-	for str_type in g.str_types {
+	for i, str_type in g.str_types {
 		g.final_gen_str(str_type)
 	}
 	for sumtype_casting_fn in g.sumtype_casting_fns {
@@ -674,8 +676,7 @@ fn (mut g Gen) typ(t ast.Type) string {
 	}
 }
 
-fn (mut g Gen) base_type(_t ast.Type) string {
-	t := g.unwrap_generic(_t)
+fn (mut g Gen) base_type(t ast.Type) string {
 	share := t.share()
 	mut styp := if share == .atomic_t { t.atomic_typename() } else { g.cc_type(t, true) }
 	if t.has_flag(.shared_f) {
@@ -5118,28 +5119,27 @@ fn (mut g Gen) const_decl_init_later(mod string, name string, expr ast.Expr, typ
 	g.definitions.writeln('$styp $cname; // inited later')
 	if cname == '_const_os__args' {
 		if g.pref.os == .windows {
-			g.inits[mod].writeln('\t_const_os__args = os__init_os_args_wide(___argc, (byteptr*)___argv);')
+			g.init.writeln('\t_const_os__args = os__init_os_args_wide(___argc, (byteptr*)___argv);')
 		} else {
-			g.inits[mod].writeln('\t_const_os__args = os__init_os_args(___argc, (byte**)___argv);')
+			g.init.writeln('\t_const_os__args = os__init_os_args(___argc, (byte**)___argv);')
 		}
 	} else {
 		if unwrap_option {
-			g.inits[mod].writeln(g.expr_string_surround('\t$cname = *($styp*)', expr,
-				'.data;'))
+			g.init.writeln(g.expr_string_surround('\t$cname = *($styp*)', expr, '.data;'))
 		} else {
-			g.inits[mod].writeln(g.expr_string_surround('\t$cname = ', expr, ';'))
+			g.init.writeln(g.expr_string_surround('\t$cname = ', expr, ';'))
 		}
 	}
 	if g.is_autofree {
 		sym := g.table.get_type_symbol(typ)
 		if styp.starts_with('Array_') {
-			g.cleanups[mod].writeln('\tarray_free(&$cname);')
+			g.cleanup.writeln('\tarray_free(&$cname);')
 		} else if styp == 'string' {
-			g.cleanups[mod].writeln('\tstring_free(&$cname);')
+			g.cleanup.writeln('\tstring_free(&$cname);')
 		} else if sym.kind == .map {
-			g.cleanups[mod].writeln('\tmap_free(&$cname);')
+			g.cleanup.writeln('\tmap_free(&$cname);')
 		} else if styp == 'IError' {
-			g.cleanups[mod].writeln('\tIError_free(&$cname);')
+			g.cleanup.writeln('\tIError_free(&$cname);')
 		}
 	}
 }
