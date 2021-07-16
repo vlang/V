@@ -48,7 +48,7 @@ fn main() {
 	// exec('git checkout $commit')
 	println('  Building vprod...')
 	os.chdir(vdir)
-	exec('$vdir/v -o $vdir/vprod -prod -prealloc cmd/v')
+	exec('$vdir/v -o $vdir/vprod -prod cmd/v')
 	// exec('v -o $vdir/vprod $vdir/cmd/v') // for faster debugging
 	// cache vlib modules
 	exec('$vdir/v wipe-cache')
