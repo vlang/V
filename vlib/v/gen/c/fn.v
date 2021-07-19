@@ -9,7 +9,11 @@ import v.util
 fn (mut g Gen) is_used_by_main(node ast.FnDecl) bool {
 	mut is_used_by_main := true
 	if g.pref.skip_unused {
-		fkey := if node.is_method { '${int(node.receiver.typ)}.$node.name' } else { node.name }
+		fkey := if node.is_method {
+			'${node.receiver.typ.set_nr_muls(0)}.$node.name'
+		} else {
+			node.name
+		}
 		is_used_by_main = g.table.used_fns[fkey]
 		$if trace_skip_unused_fns ? {
 			println('> is_used_by_main: $is_used_by_main | node.name: $node.name | fkey: $fkey | node.is_method: $node.is_method')
@@ -21,7 +25,11 @@ fn (mut g Gen) is_used_by_main(node ast.FnDecl) bool {
 		}
 	} else {
 		$if trace_skip_unused_fns_in_c_code ? {
-			fkey := if node.is_method { '${int(node.receiver.typ)}.$node.name' } else { node.name }
+			fkey := if node.is_method {
+				'${node.receiver.typ.set_nr_muls(0)}.$node.name'
+			} else {
+				node.name
+			}
 			g.writeln('// trace_skip_unused_fns_in_c_code, $node.name, fkey: $fkey')
 		}
 	}
@@ -285,7 +293,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 					g.defer_vars << var.name
 					mut deref := ''
 					if v := var.scope.find_var(var.name) {
-						if v.is_auto_heap {
+						if v.is_auto_heap || v.is_auto_deref {
 							deref = '*'
 						}
 					}
@@ -412,6 +420,9 @@ fn (mut g Gen) fn_args(args []ast.Param, is_variadic bool, scope &ast.Scope) ([]
 		typ := g.unwrap_generic(arg.typ)
 		arg_type_sym := g.table.get_type_symbol(typ)
 		mut arg_type_name := g.typ(typ) // util.no_dots(arg_type_sym.name)
+		if arg.is_mut && !typ.has_flag(.shared_f) {
+			arg_type_name += '*'
+		}
 		if arg_type_sym.kind == .function {
 			info := arg_type_sym.info as ast.FnType
 			func := info.func
@@ -756,13 +767,28 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			g.write('${name}(')
 		}
 	}
+	mut idname := ''
 	if node.receiver_type.is_ptr() && (!node.left_type.is_ptr()
 		|| node.from_embed_type != 0 || (node.left_type.has_flag(.shared_f) && node.name != 'str')) {
 		// The receiver is a reference, but the caller provided a value
 		// Add `&` automatically.
 		// TODO same logic in call_args()
 		if !is_range_slice {
-			g.write('&')
+			if node.left is ast.Ident {
+				if node.left.obj is ast.Var {
+					if node.from_embed_type == 0
+						&& (node.left.obj.is_auto_deref || node.left.obj.is_auto_heap) {
+						// optimize &(*(x)) -> x
+						idname = node.left.obj.name
+					} else {
+						g.write('&')
+					}
+				} else {
+					g.write('&')
+				}
+			} else {
+				g.write('&')
+			}
 		}
 	} else if !node.receiver_type.is_ptr() && node.left_type.is_ptr() && node.name != 'str'
 		&& node.from_embed_type == 0 {
@@ -790,16 +816,16 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		arg_name := '_arg_expr_${fn_name}_0_$node.pos.pos'
 		g.write('/*af receiver arg*/' + arg_name)
 	} else {
-		if left_sym.kind == .array && node.left.is_auto_deref_var()
-			&& node.name in ['first', 'last', 'repeat'] {
-			g.write('*')
-		}
 		if node.left is ast.MapInit {
 			g.write('(map[]){')
 			g.expr(node.left)
 			g.write('}[0]')
 		} else {
-			g.expr(node.left)
+			if idname != '' {
+				g.write(idname)
+			} else {
+				g.expr(node.left)
+			}
 		}
 		if node.from_embed_type != 0 {
 			embed_name := typ_sym.embed_name()
@@ -1170,10 +1196,6 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 					g.write('/*af arg*/' + name)
 				}
 			} else {
-				if node.concrete_types.len > 0 && arg.expr.is_auto_deref_var() && !arg.is_mut
-					&& !expected_types[i].is_ptr() {
-					g.write('*')
-				}
 				g.ref_or_deref_arg(arg, expected_types[i], node.language)
 			}
 		} else {
@@ -1186,6 +1208,10 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 			} else {
 				g.expr(arg.expr)
 			}
+		}
+		j := if i < expected_types.len { i } else { expected_types.len - 1 }
+		if arg.typ.has_flag(.shared_f) && !expected_types[j].has_flag(.shared_f) {
+			g.write('->val')
 		}
 		if i < args.len - 1 || is_variadic {
 			g.write(', ')
@@ -1267,21 +1293,87 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type ast.Type, lang as
 		g.checker_bug('ref_or_deref_arg expected_type is 0', arg.pos)
 	}
 	exp_sym := g.table.get_type_symbol(expected_type)
+	arg_sym := g.table.get_type_symbol(arg.typ)
+	mut is_amp := false
+	needs_interface_promotion := exp_sym.kind == .interface_ && arg_sym.kind != .interface_
+	mut needs_array_promotion := false
+	mut is_non_ptr_index_expr := false
+	mut is_auto_deref := false
+	mut is_heap := false
+	mut name := ''
+	match arg.expr {
+		ast.Ident {
+			obj := arg.expr.obj
+			if obj is ast.Var {
+				is_auto_deref = obj.is_auto_deref
+				is_heap = obj.is_auto_heap
+				if is_auto_deref {
+					// to optimize &(*(x)) -> x
+					name = obj.name
+				}
+			}
+		}
+		ast.SelectorExpr {
+			left := arg.expr.expr
+			if left is ast.Ident {
+				obj := left.obj
+				if obj is ast.Var {
+					// is_auto_deref = obj.is_auto_deref
+					if obj.is_auto_deref {
+						needs_array_promotion = true
+					}
+				}
+			}
+		}
+		ast.PrefixExpr {
+			if arg.expr.op == .amp {
+				is_amp = true
+			}
+			if arg.expr.op == .amp || arg.expr.op == .mul {
+				if arg.expr.right is ast.Ident {
+					obj := arg.expr.right.obj
+					if obj is ast.Var {
+						is_auto_deref = obj.is_auto_deref
+					}
+				}
+			}
+		}
+		ast.IndexExpr {
+			left_type_sym := g.table.get_type_symbol(arg.expr.left_type)
+			is_non_ptr_index_expr = left_type_sym.kind != .map
+				&& (expr_is_ptr || arg.expr.index is ast.RangeExpr)
+		}
+		else {}
+	}
+	mut needs_closing_brace := false
 	if arg.is_mut && !arg_is_ptr {
-		g.write('&/*mut*/')
-	} else if arg_is_ptr && !expr_is_ptr {
+		if !(is_amp && exp_sym.kind == .interface_ && arg_sym.kind == .interface_) {
+			if needs_interface_promotion || is_non_ptr_index_expr
+				|| (exp_sym.kind == .array && needs_array_promotion) {
+				if is_heap {
+					g.write('HEAP(/*mut*/$exp_sym.cname, ')
+				} else {
+					g.write('ADDR(/*mut*/$exp_sym.cname, ')
+				}
+				needs_closing_brace = true
+			} else {
+				if !(expr_is_ptr && exp_sym.kind == .interface_ && arg_sym.kind == .interface_) {
+					g.write('&/*mut*/')
+				}
+			}
+		}
+	} else if arg_is_ptr && !(expr_is_ptr || is_auto_deref) {
 		if arg.is_mut {
 			if exp_sym.kind == .array {
 				if arg.expr is ast.Ident && (arg.expr as ast.Ident).kind == .variable {
-					g.write('&/*arr*/')
-					g.expr(arg.expr)
+					g.write('&(/*arr*/')
 				} else {
 					// Special case for mutable arrays. We can't `&` function
-					// results,	have to use `(array[]){ expr }[0]` hack.
-					g.write('&/*111*/(array[]){')
-					g.expr(arg.expr)
-					g.write('}[0]')
+					// results,     have to use `(array[]){ expr }[0]` hack.
+					g.write('ADDR(/*arr*/array, ')
 				}
+				g.expr(arg.expr)
+				g.write(')')
 				return
 			}
 		}
@@ -1301,15 +1393,26 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type ast.Type, lang as
 				g.write('(voidptr)&/*qq*/')
 			}
 		}
+	} else if
+		(arg_is_ptr && !arg.is_mut && !expr_is_ptr && arg_sym.kind != .function && !g.is_json_fn)
+		|| (arg_is_ptr && expr_is_ptr && arg.is_mut && !expected_type.has_flag(.shared_f)) {
+		if name != '' {
+			g.write(name)
+			return
+		} else {
+			g.write('/*auto ptr*/&')
+		}
 	} else if arg.typ.has_flag(.shared_f) && !expected_type.has_flag(.shared_f) {
 		if expected_type.is_ptr() {
 			g.write('&')
 		}
 		g.expr(arg.expr)
-		g.write('->val')
 		return
 	}
 	g.expr_with_cast(arg.expr, arg.typ, expected_type)
+	if needs_closing_brace {
+		g.write(')')
+	}
 }
 
 fn (mut g Gen) is_gui_app() bool {

@@ -377,7 +377,7 @@ pub fn (mut w Walker) fn_decl(mut node ast.FnDecl) {
 	if node.language == .c {
 		return
 	}
-	fkey := if node.is_method { '${int(node.receiver.typ)}.$node.name' } else { node.name }
+	fkey := if node.is_method { '${node.receiver.typ.set_nr_muls(0)}.$node.name' } else { node.name }
 	if w.used_fns[fkey] {
 		// This function is already known to be called, meaning it has been processed already.
 		// Save CPU time and do nothing.
@@ -399,7 +399,7 @@ pub fn (mut w Walker) call_expr(mut node ast.CallExpr) {
 	w.or_block(node.or_block)
 	//
 	fn_name := if node.is_method {
-		int(node.receiver_type).str() + '.' + node.name
+		int(node.receiver_type.set_nr_muls(0)).str() + '.' + node.name
 	} else {
 		node.name
 	}
@@ -409,7 +409,7 @@ pub fn (mut w Walker) call_expr(mut node ast.CallExpr) {
 	w.mark_fn_as_used(fn_name)
 	stmt := w.all_fns[fn_name] or { return }
 	if stmt.name == node.name {
-		if !node.is_method || (node.receiver_type == stmt.receiver.typ) {
+		if !node.is_method || node.receiver_type.set_nr_muls(0) == stmt.receiver.typ.set_nr_muls(0) {
 			w.stmts(stmt.stmts)
 		}
 	}

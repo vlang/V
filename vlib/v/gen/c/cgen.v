@@ -944,6 +944,9 @@ pub fn (mut g Gen) write_fn_typesymbol_declaration(sym ast.TypeSymbol) {
 		g.type_definitions.write_string('typedef ${g.typ(func.return_type)} (*$fn_name)(')
 		for i, param in func.params {
 			g.type_definitions.write_string(g.typ(param.typ))
+			if param.is_mut {
+				g.type_definitions.write_string('*')
+			}
 			if i < func.params.len - 1 {
 				g.type_definitions.write_string(',')
 			}
@@ -1622,12 +1625,12 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 				// instead of
 				// `int* val = ((int**)arr.data)[i];`
 				// right := if node.val_is_mut { styp } else { styp + '*' }
-				right := if node.val_is_mut {
-					'(($styp)$cond_var${op_field}data) + $i'
+				ltyp, right := if node.val_is_mut {
+					'$styp*', '(($styp*)$cond_var${op_field}data) + $i'
 				} else {
-					'(($styp*)$cond_var${op_field}data)[$i]'
+					'$styp', '(($styp*)$cond_var${op_field}data)[$i]'
 				}
-				g.writeln('\t$styp ${c_name(node.val_var)} = $right;')
+				g.writeln('\t$ltyp ${c_name(node.val_var)} = $right;')
 			}
 		}
 	} else if node.kind == .array_fixed {
@@ -1668,7 +1671,11 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 				g.writeln('\t$styp ${c_name(node.val_var)};')
 				g.writeln('\tmemcpy(*($styp*)${c_name(node.val_var)}, (byte*)$cond_var[$idx], sizeof($styp));')
 			} else {
-				styp := g.typ(node.val_type)
+				styp := if node.val_is_mut {
+					g.typ(node.val_type.to_ptr())
+				} else {
+					g.typ(node.val_type)
+				}
 				g.write('\t$styp ${c_name(node.val_var)}')
 			}
 			if !is_fixed_array {
@@ -1738,7 +1745,9 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 				g.writeln('memcpy(*($val_styp*)${c_name(node.val_var)}, (byte*)DenseArray_value(&$cond_var${arw_or_pt}key_values, $idx), sizeof($val_styp));')
 			} else {
 				val_styp := g.typ(node.val_type)
-				if node.val_type.is_ptr() {
+				if node.val_is_mut {
+					g.write('$val_styp* ${c_name(node.val_var)} = &(*($val_styp*)')
+				} else if node.val_type.is_ptr() {
 					g.write('$val_styp ${c_name(node.val_var)} = &(*($val_styp)')
 				} else {
 					g.write('$val_styp ${c_name(node.val_var)} = (*($val_styp*)')
@@ -1779,7 +1788,7 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 		receiver_styp := g.typ(receiver_typ)
 		fn_name := receiver_styp.replace_each(['*', '', '.', '__']) + '_next'
 		g.write('\t${g.typ(ret_typ)} $t_var = ${fn_name}(')
-		if !node.cond_type.is_ptr() && receiver_typ.is_ptr() {
+		if !node.cond_type.is_ptr() && (receiver_typ.is_ptr() || next_fn.params[0].is_mut) {
 			g.write('&')
 		}
 		g.writeln('$t_expr);')
@@ -1841,6 +1850,9 @@ fn (mut g Gen) write_sumtype_casting_fn(got_ ast.Type, exp_ ast.Type) {
 fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp_is_ptr bool, exp_styp string, got_is_ptr bool, got_styp string) {
 	mut rparen_n := 1
 	if exp_is_ptr {
+		if g.out.last_n(1) == '&' {
+			g.out.go_back(1)
+		}
 		g.write('HEAP($exp_styp, ')
 		rparen_n++
 	}
@@ -2206,7 +2218,10 @@ fn (mut g Gen) write_fn_ptr_decl(func &ast.FnType, ptr_name string) {
 	g.write('$ret_styp (*$ptr_name) (')
 	arg_len := func.func.params.len
 	for i, arg in func.func.params {
-		arg_styp := g.typ(arg.typ)
+		mut arg_styp := g.typ(arg.typ)
+		if arg.is_mut {
+			arg_styp += '*'
+		}
 		g.write('$arg_styp $arg.name')
 		if i < arg_len - 1 {
 			g.write(', ')
@@ -2345,9 +2360,6 @@ fn (mut g Gen) gen_assign_stmt(assign_stmt ast.AssignStmt) {
 					if is_auto_heap {
 						g.write('*')
 					}
-				}
-				if lx.is_auto_deref_var() {
-					g.write('*')
 				}
 				g.expr(lx)
 				noscan := if is_auto_heap { g.check_noscan(return_type) } else { '' }
@@ -2587,10 +2599,8 @@ fn (mut g Gen) gen_assign_stmt(assign_stmt ast.AssignStmt) {
 				g.arraymap_set_pos = 0
 			} else {
 				g.out.go_back_to(pos)
-				is_var_mut := !is_decl && left.is_auto_deref_var()
-				addr := if is_var_mut { '' } else { '&' }
 				g.writeln('')
-				g.write('memcpy($addr')
+				g.write('memcpy(&')
 				g.expr(left)
 				g.writeln(', &$v_var, sizeof($arr_typ));')
 			}
@@ -2681,9 +2691,6 @@ fn (mut g Gen) gen_assign_stmt(assign_stmt ast.AssignStmt) {
 					g.prevent_sum_type_unwrapping_once = true
 				}
 				if !is_fixed_array_var || is_decl {
-					if !is_decl && left.is_auto_deref_var() {
-						g.write('*')
-					}
 					g.expr(left)
 				}
 			}
@@ -2727,6 +2734,9 @@ fn (mut g Gen) gen_assign_stmt(assign_stmt ast.AssignStmt) {
 				*/
 			}
 			g.is_shared = var_type.has_flag(.shared_f)
+			if assign_stmt.ref_compat[i] {
+				g.write('&')
+			}
 			if !cloned {
 				if is_fixed_array_var {
 					typ_str := g.typ(val_type).trim('*')
@@ -2757,9 +2767,6 @@ fn (mut g Gen) gen_assign_stmt(assign_stmt ast.AssignStmt) {
 					} else {
 						if is_auto_heap {
 							g.write('HEAP($styp, (')
-						}
-						if val.is_auto_deref_var() {
-							g.write('*')
 						}
 						g.expr(val)
 						if is_auto_heap {
@@ -2829,7 +2836,9 @@ fn (mut g Gen) gen_cross_tmp_variable(left []ast.Expr, val ast.Expr) {
 			g.gen_cross_tmp_variable(left, val.right)
 		}
 		ast.PrefixExpr {
-			g.write(val.op.str())
+			if !val.ref_compat {
+				g.write(val.op.str())
+			}
 			g.gen_cross_tmp_variable(left, val.right)
 		}
 		ast.PostfixExpr {
@@ -3336,13 +3345,7 @@ fn (mut g Gen) expr(node ast.Expr) {
 				g.writeln('sync__RwMutex_lock(&$node.auto_locked->mtx);')
 			}
 			g.inside_map_postfix = true
-			if node.expr.is_auto_deref_var() {
-				g.write('(*')
-				g.expr(node.expr)
-				g.write(')')
-			} else {
-				g.expr(node.expr)
-			}
+			g.expr(node.expr)
 			g.inside_map_postfix = false
 			g.write(node.op.str())
 			if node.auto_locked != '' {
@@ -3388,11 +3391,9 @@ fn (mut g Gen) expr(node ast.Expr) {
 					}
 				}
 			} else {
-				// g.write('/*pref*/')
-				if !(g.is_amp && node.right.is_auto_deref_var()) {
+				if !node.ref_compat {
 					g.write(node.op.str())
 				}
-				// g.write('(')
 				g.expr(node.right)
 			}
 			g.is_amp = false
@@ -4057,9 +4058,6 @@ fn (mut g Gen) map_init(node ast.MapInit) {
 			g.write('}), _MOV(($value_typ_str[$size]){')
 		}
 		for expr in node.vals {
-			if expr.is_auto_deref_var() {
-				g.write('*')
-			}
 			g.expr(expr)
 			g.write(', ')
 		}
@@ -4229,6 +4227,9 @@ fn (mut g Gen) select_expr(node ast.SelectExpr) {
 }
 
 fn (mut g Gen) ident(node ast.Ident) {
+	if node.ref_compat {
+		g.write('&')
+	}
 	prevent_sum_type_unwrapping_once := g.prevent_sum_type_unwrapping_once
 	g.prevent_sum_type_unwrapping_once = false
 	if node.name == 'lld' {
@@ -4245,7 +4246,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 	mut name := c_name(node.name)
 	// TODO: temporary, remove this
 	node_info := node.info
-	mut is_auto_heap := false
+	mut is_auto_ref := false
 	if node_info is ast.IdentVar {
 		// x ?int
 		// `x = 10` => `x.data = 10` (g.right_is_opt == false)
@@ -4261,18 +4262,22 @@ fn (mut g Gen) ident(node ast.Ident) {
 			g.write('${name}.val')
 			return
 		}
-		scope := g.file.scope.innermost(node.pos.pos)
-		if v := scope.find_var(node.name) {
-			is_auto_heap = v.is_auto_heap && (!g.is_assign_lhs || g.assign_op != .decl_assign)
-			if is_auto_heap {
+		if node.obj is ast.Var {
+			is_auto_ref =
+				(node.obj.is_auto_heap && (!g.is_assign_lhs || g.assign_op != .decl_assign))
+				|| node.obj.is_auto_deref
+			if is_auto_ref {
 				g.write('(*(')
 			}
+		}
+		scope := g.file.scope.innermost(node.pos.pos)
+		if v := scope.find_var(node.name) {
 			if v.smartcasts.len > 0 {
 				v_sym := g.table.get_type_symbol(v.typ)
 				if !prevent_sum_type_unwrapping_once {
 					for _ in v.smartcasts {
 						g.write('(')
-						if v_sym.kind == .sum_type && !is_auto_heap {
+						if v_sym.kind == .sum_type && !is_auto_ref && !v.is_auto_deref {
 							g.write('*')
 						}
 					}
@@ -4281,11 +4286,11 @@ fn (mut g Gen) ident(node ast.Ident) {
 						mut is_ptr := false
 						if i == 0 {
 							g.write(name)
-							if v.orig_type.is_ptr() {
+							if v.orig_type.is_ptr() || (v.is_mut && v.is_arg) {
 								is_ptr = true
 							}
 						}
-						dot := if is_ptr || is_auto_heap { '->' } else { '.' }
+						dot := if is_ptr || is_auto_ref { '->' } else { '.' }
 						if mut cast_sym.info is ast.Aggregate {
 							sym := g.table.get_type_symbol(cast_sym.info.types[g.aggregate_type_idx])
 							g.write('${dot}_$sym.cname')
@@ -4294,7 +4299,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 						}
 						g.write(')')
 					}
-					if is_auto_heap {
+					if is_auto_ref {
 						g.write('))')
 					}
 					return
@@ -4311,7 +4316,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 		}
 	}
 	g.write(g.get_ternary_name(name))
-	if is_auto_heap {
+	if is_auto_ref {
 		g.write('))')
 	}
 }
@@ -4653,6 +4658,9 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 		if node.exprs.len == 1 && node.exprs[0] is ast.IfExpr {
 			// use a temporary for `return if cond { x,y } else { a,b }`
 			g.write('$ret_typ $tmpvar = ')
+			if node.ref_compat[0] {
+				g.write('&')
+			}
 			g.expr(node.exprs[0])
 			g.writeln(';')
 			g.write_defer_stmts_when_needed()
@@ -4719,8 +4727,8 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 				continue
 			}
 			g.write('.arg$arg_idx=')
-			if expr.is_auto_deref_var() {
-				g.write('*')
+			if node.ref_compat[i] {
+				g.write('&')
 			}
 			g.expr(expr)
 			arg_idx++
@@ -4769,6 +4777,9 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 				}
 			}
 			for i, expr in node.exprs {
+				if node.ref_compat[i] {
+					g.write('&')
+				}
 				g.expr_with_cast(expr, node.types[i], g.fn_decl.return_type.clear_flag(.optional))
 				if i < node.exprs.len - 1 {
 					g.write(', ')
@@ -4811,17 +4822,10 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			g.autofree_scope_vars(node.pos.pos - 1, node.pos.line_nr, true)
 			g.write('return ')
 		}
-		if expr0.is_auto_deref_var() {
-			if g.fn_decl.return_type.is_ptr() {
-				var_str := g.expr_string(expr0)
-				g.write(var_str.trim('&'))
-			} else {
-				g.write('*')
-				g.expr(expr0)
-			}
-		} else {
-			g.expr_with_cast(node.exprs[0], node.types[0], g.fn_decl.return_type)
+		if node.ref_compat[0] {
+			g.write('&')
 		}
+		g.expr_with_cast(node.exprs[0], node.types[0], g.fn_decl.return_type)
 		if use_tmp_var {
 			g.writeln(';')
 			has_semicolon = true
@@ -5951,17 +5955,19 @@ fn (mut g Gen) go_expr(node ast.GoExpr) {
 	g.writeln('$wrapper_struct_name *$arg_tmp_var = malloc(sizeof(thread_arg_$name));')
 	if expr.is_method {
 		g.write('$arg_tmp_var->arg0 = ')
-		// TODO is this needed?
-		/*
-		if false && !expr.return_type.is_ptr() {
+		if expr.receiver_type.is_ptr() && !expr.receiver_type.has_flag(.shared_f)
+			&& !expr.left_type.is_ptr() {
 			g.write('&')
 		}
-		*/
 		g.expr(expr.left)
 		g.writeln(';')
 	}
 	for i, arg in expr.args {
 		g.write('$arg_tmp_var->arg${i + 1} = ')
+		if (arg.is_mut || expr.expected_arg_types[i].is_ptr())
+			&& !expr.expected_arg_types[i].has_flag(.shared_f) && !arg.typ.is_ptr() {
+			g.write('&')
+		}
 		g.expr(arg.expr)
 		g.writeln(';')
 	}
@@ -6045,7 +6051,11 @@ fn (mut g Gen) go_expr(node ast.GoExpr) {
 	if name !in g.threaded_fns {
 		g.type_definitions.writeln('\ntypedef struct $wrapper_struct_name {')
 		if expr.is_method {
-			styp := g.typ(expr.receiver_type)
+			mut rec_typ := expr.receiver_type
+			if rec_typ.has_flag(.shared_f) {
+				rec_typ = rec_typ.set_nr_muls(1)
+			}
+			styp := g.typ(rec_typ)
 			g.type_definitions.writeln('\t$styp arg0;')
 		}
 		need_return_ptr := g.pref.os == .windows && node.call_expr.return_type != ast.void_type
@@ -6053,7 +6063,11 @@ fn (mut g Gen) go_expr(node ast.GoExpr) {
 			g.type_definitions.writeln('EMPTY_STRUCT_DECLARATION;')
 		} else {
 			for i, arg in expr.args {
-				styp := g.typ(arg.typ)
+				mut styp := g.typ(arg.typ)
+				if (arg.is_mut || expr.expected_arg_types[i].is_ptr())
+					&& !expr.expected_arg_types[i].has_flag(.shared_f) && !arg.typ.is_ptr() {
+					styp += '*'
+				}
 				g.type_definitions.writeln('\t$styp arg${i + 1};')
 			}
 		}
@@ -6223,7 +6237,8 @@ fn (mut g Gen) interface_table() string {
 			// the first param is the receiver, it's handled by `void*` above
 			for i in 1 .. method.params.len {
 				arg := method.params[i]
-				methods_struct_def.write_string(', ${g.typ(arg.typ)} $arg.name')
+				mut_ref := if arg.is_mut { '*' } else { '' }
+				methods_struct_def.write_string(', ${g.typ(arg.typ)}$mut_ref $arg.name')
 			}
 			// TODO g.fn_args(method.args[1..], method.is_variadic)
 			methods_struct_def.writeln(');')
@@ -6351,7 +6366,7 @@ static inline $interface_name I_${cctype}_to_Interface_${interface_name}($cctype
 				}
 				// .speak = Cat_speak
 				mut method_call := '${cctype}_$name'
-				if !method.params[0].typ.is_ptr() {
+				if !method.params[0].typ.is_ptr() && !method.params[0].is_mut {
 					// inline void Cat_speak_Interface_Animal_method_wrapper(Cat c) { return Cat_speak(*c); }
 					iwpostfix := '_Interface_${interface_name}_method_wrapper'
 					methods_wrapper.write_string('static inline ${g.typ(method.return_type)} $method_call${iwpostfix}(')
