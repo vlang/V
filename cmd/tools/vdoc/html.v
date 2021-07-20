@@ -4,6 +4,7 @@ import os
 import net.urllib
 import strings
 import markdown
+import regex
 import v.scanner
 import v.ast
 import v.token
@@ -493,7 +494,11 @@ fn doc_node_html(dn doc.DocNode, link string, head bool, include_examples bool, 
 }
 
 fn html_tag_escape(str string) string {
-	return str.replace_each(['<', '&lt;', '>', '&gt;'])
+	excaped_string := str.replace_each(['<', '&lt;', '>', '&gt;'])
+	if regex.regex_opt('`.+[(&lt;)(&gt;)].+`') or {panic(err)}.find_all_str(excaped_string).len > 0 {
+		return str
+	}
+	return excaped_string
 }
 
 /*
