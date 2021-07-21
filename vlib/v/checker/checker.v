@@ -4227,6 +4227,13 @@ pub fn (mut c Checker) ensure_sumtype_array_has_default_value(array_init ast.Arr
 	}
 }
 
+pub fn (mut c Checker) ensure_reference_array_has_default_value(array_init ast.ArrayInit) {
+	if array_init.elem_type.is_ptr() && !array_init.has_default {
+		c.error('an array of references with `len:` > 0, should always be initialized with `init:`',
+			array_init.pos)
+	}
+}
+
 pub fn (mut c Checker) array_init(mut array_init ast.ArrayInit) ast.Type {
 	// println('checker: array init $array_init.pos.line_nr $c.file.path')
 	mut elem_type := ast.void_type
@@ -4256,12 +4263,14 @@ pub fn (mut c Checker) array_init(mut array_init ast.ArrayInit) ast.Type {
 				}
 			}
 			c.ensure_sumtype_array_has_default_value(array_init)
+			c.ensure_reference_array_has_default_value(array_init)
 		}
 		c.ensure_type_exists(array_init.elem_type, array_init.elem_type_pos) or {}
 		return array_init.typ
 	}
 	if array_init.is_fixed {
 		c.ensure_sumtype_array_has_default_value(array_init)
+		c.ensure_reference_array_has_default_value(array_init)
 		c.ensure_type_exists(array_init.elem_type, array_init.elem_type_pos) or {}
 	}
 	// a = []
