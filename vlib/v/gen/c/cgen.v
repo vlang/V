@@ -10,6 +10,7 @@ import v.pref
 import v.token
 import v.util
 import v.depgraph
+import sync.pool
 
 const (
 	// NB: some of the words in c_reserved, are not reserved in C,
@@ -36,10 +37,11 @@ fn string_array_to_map(a []string) map[string]bool {
 }
 
 struct Gen {
-	pref         &pref.Preferences
-	module_built string
+	pref                &pref.Preferences
+	module_built        string
+	timers_should_print bool
+	table               &ast.Table
 mut:
-	table                  &ast.Table
 	out                    strings.Builder
 	cheaders               strings.Builder
 	includes               strings.Builder // all C #includes required by V modules
@@ -48,6 +50,8 @@ mut:
 	type_definitions       strings.Builder // typedefs, defines etc (everything that goes to the top of the file)
 	definitions            strings.Builder // typedefs, defines etc (everything that goes to the top of the file)
 	inits                  map[string]strings.Builder // contents of `void _vinit/2{}`
+	init                   strings.Builder
+	cleanup                strings.Builder
 	cleanups               map[string]strings.Builder // contents of `void _vcleanup(){}`
 	gowrappers             strings.Builder // all go callsite wrappers
 	stringliterals         strings.Builder // all string literals (they depend on tos3() beeing defined
@@ -59,7 +63,6 @@ mut:
 	shared_types           strings.Builder // shared/lock types
 	shared_functions       strings.Builder // shared constructors
 	channel_definitions    strings.Builder // channel related code
-	options_typedefs       strings.Builder // Option typedefs
 	options                strings.Builder // `Option_xxxx` types
 	json_forward_decls     strings.Builder // json type forward decls
 	enum_typedefs          strings.Builder // enum types
@@ -67,21 +70,21 @@ mut:
 	file                   &ast.File
 	fn_decl                &ast.FnDecl // pointer to the FnDecl we are currently inside otherwise 0
 	last_fn_c_name         string
-	tmp_count              int      // counter for unique tmp vars (_tmp1, _tmp2 etc); resets at the start of each fn.
-	tmp_count2             int      // a separate tmp var counter for autofree fn calls
-	tmp_count_declarations int      // counter for unique tmp names (_d1, _d2 etc); does NOT reset, used for C declarations
-	is_assign_lhs          bool     // inside left part of assign expr (for array_set(), etc)
-	discard_or_result      bool     // do not safe last ExprStmt of `or` block in tmp variable to defer ongoing expr usage
-	is_void_expr_stmt      bool     // ExprStmt whos result is discarded
-	is_arraymap_set        bool     // map or array set value state
-	is_amp                 bool     // for `&Foo{}` to merge PrefixExpr `&` and StructInit `Foo{}`; also for `&byte(0)` etc
-	is_sql                 bool     // Inside `sql db{}` statement, generating sql instead of C (e.g. `and` instead of `&&` etc)
-	is_shared              bool     // for initialization of hidden mutex in `[rw]shared` literals
-	is_vlines_enabled      bool     // is it safe to generate #line directives when -g is passed
-	inside_cast_in_heap    int      // inside cast to interface type in heap (resolve recursive calls)
-	arraymap_set_pos       int      // map or array set value position
-	vlines_path            string   // set to the proper path for generating #line directives
-	optionals              []string // to avoid duplicates TODO perf, use map
+	tmp_count              int    // counter for unique tmp vars (_tmp1, _tmp2 etc); resets at the start of each fn.
+	tmp_count2             int    // a separate tmp var counter for autofree fn calls
+	tmp_count_declarations int    // counter for unique tmp names (_d1, _d2 etc); does NOT reset, used for C declarations
+	is_assign_lhs          bool   // inside left part of assign expr (for array_set(), etc)
+	discard_or_result      bool   // do not safe last ExprStmt of `or` block in tmp variable to defer ongoing expr usage
+	is_void_expr_stmt      bool   // ExprStmt whos result is discarded
+	is_arraymap_set        bool   // map or array set value state
+	is_amp                 bool   // for `&Foo{}` to merge PrefixExpr `&` and StructInit `Foo{}`; also for `&byte(0)` etc
+	is_sql                 bool   // Inside `sql db{}` statement, generating sql instead of C (e.g. `and` instead of `&&` etc)
+	is_shared              bool   // for initialization of hidden mutex in `[rw]shared` literals
+	is_vlines_enabled      bool   // is it safe to generate #line directives when -g is passed
+	inside_cast_in_heap    int    // inside cast to interface type in heap (resolve recursive calls)
+	arraymap_set_pos       int    // map or array set value position
+	vlines_path            string // set to the proper path for generating #line directives
+	optionals              map[string]string // to avoid duplicates
 	chan_pop_optionals     []string // types for `x := <-ch or {...}`
 	chan_push_optionals    []string // types for `ch <- x or {...}`
 	cur_lock               ast.LockExpr
@@ -108,15 +111,11 @@ mut:
 	defer_stmts            []ast.DeferStmt
 	defer_ifdef            string
 	defer_profile_code     string
-	str_types              []string     // types that need automatic str() generation
-	threaded_fns           []string     // for generating unique wrapper types and fns for `go xxx()`
-	waiter_fns             []string     // functions that wait for `go xxx()` to finish
-	array_fn_definitions   []string     // array equality functions that have been defined
-	map_fn_definitions     []string     // map equality functions that have been defined
-	struct_fn_definitions  []string     // struct equality functions that have been defined
-	sumtype_fn_definitions []string     // sumtype equality functions that have been defined
-	alias_fn_definitions   []string     // alias equality functions that have been defined
-	auto_fn_definitions    []string     // auto generated functions defination list
+	str_types              []StrType // types that need automatic str() generation
+	threaded_fns           []string  // for generating unique wrapper types and fns for `go xxx()`
+	waiter_fns             []string  // functions that wait for `go xxx()` to finish
+	auto_fn_definitions    []string  // auto generated functions defination list
+	sumtype_casting_fns    []SumtypeCastingFn
 	anon_fn_definitions    []string     // anon generated functions defination list
 	sumtype_definitions    map[int]bool // `_TypeA_to_sumtype_TypeB()` fns that have been generated
 	is_json_fn             bool     // inside json.encode()
@@ -172,9 +171,15 @@ mut:
 	as_cast_type_names map[string]string // table for type name lookup in runtime (for __as_cast)
 	obf_table          map[string]string
 	// main_fn_decl_node  ast.FnDecl
-	expected_cast_type ast.Type // for match expr of sumtypes
-	defer_vars         []string
-	anon_fn            bool
+	expected_cast_type  ast.Type // for match expr of sumtypes
+	defer_vars          []string
+	anon_fn             bool
+	tests_inited        bool
+	autofree_used       bool
+	cur_concrete_types  []ast.Type  // do not use table.cur_concrete_types because table is global, so should not be accessed by different threads
+	cur_fn              &ast.FnDecl = 0 // same here
+	needed_equality_fns []ast.Type
+	generated_eq_fns    []ast.Type
 }
 
 pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
@@ -193,7 +198,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	$if time_cgening ? {
 		timers_should_print = true
 	}
-	mut g := Gen{
+	mut global_g := Gen{ // TODO: make shared
 		file: 0
 		out: strings.new_builder(512000)
 		cheaders: strings.new_builder(15000)
@@ -209,7 +214,6 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		pcs_declarations: strings.new_builder(100)
 		hotcode_definitions: strings.new_builder(100)
 		embedded_data: strings.new_builder(1000)
-		options_typedefs: strings.new_builder(100)
 		options: strings.new_builder(100)
 		shared_types: strings.new_builder(100)
 		shared_functions: strings.new_builder(100)
@@ -223,54 +227,161 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		is_autofree: true
 		indent: -1
 		module_built: module_built
+		timers_should_print: timers_should_print
 		timers: util.new_timers(timers_should_print)
 		inner_loop: &ast.EmptyStmt{}
 	}
-	g.timers.start('cgen init')
-	for mod in g.table.modules {
-		g.inits[mod] = strings.new_builder(100)
-		g.cleanups[mod] = strings.new_builder(100)
+	// lock global_g {
+	global_g.timers.start('cgen init')
+	for mod in global_g.table.modules {
+		global_g.inits[mod] = strings.new_builder(100)
+		global_g.cleanups[mod] = strings.new_builder(100)
 	}
-	g.init()
-	g.timers.show('cgen init')
-	mut tests_inited := false
-	mut autofree_used := false
-	for file in files {
-		g.timers.start('cgen_file $file.path')
-		g.file = file
-		if g.pref.is_vlines {
-			g.vlines_path = util.vlines_escape_path(file.path, g.pref.ccompiler)
-		}
-		// println('\ncgen "$g.file.path" nr_stmts=$file.stmts.len')
-		// building_v := true && (g.file.path.contains('/vlib/') || g.file.path.contains('cmd/v'))
-		g.is_test = g.pref.is_test
-		if g.file.path == '' || !g.pref.autofree {
-			// cgen test or building V
-			// println('autofree=false')
-			g.is_autofree = false
-		} else {
-			g.is_autofree = true
-			autofree_used = true
-		}
-		// anon fn may include assert and thus this needs
-		// to be included before any test contents are written
-		if g.is_test && !tests_inited {
-			g.write_tests_definitions()
-			tests_inited = true
-		}
-		g.stmts(file.stmts)
-		// Transfer embedded files
-		if file.embedded_files.len > 0 {
-			for path in file.embedded_files {
-				if path !in g.embedded_files {
-					g.embedded_files << path
+	global_g.init()
+	global_g.timers.show('cgen init')
+	global_g.tests_inited = false
+	global_g.autofree_used = false
+	//	}
+	mut pp := pool.new_pool_processor(
+		callback: fn (p &pool.PoolProcessor, idx int, wid int) &Gen {
+			file := p.get_item<&ast.File>(idx)
+			mut global_g := &Gen(p.get_shared_context())
+			mut local_timers := util.new_timers(global_g.timers_should_print)
+			local_timers.start('cgen_file $file.path')
+			mut g := &Gen{
+				file: file
+				out: strings.new_builder(512000)
+				cheaders: strings.new_builder(15000)
+				includes: strings.new_builder(100)
+				typedefs: strings.new_builder(100)
+				typedefs2: strings.new_builder(100)
+				type_definitions: strings.new_builder(100)
+				definitions: strings.new_builder(100)
+				gowrappers: strings.new_builder(100)
+				stringliterals: strings.new_builder(100)
+				auto_str_funcs: strings.new_builder(100)
+				comptime_defines: strings.new_builder(100)
+				pcs_declarations: strings.new_builder(100)
+				hotcode_definitions: strings.new_builder(100)
+				embedded_data: strings.new_builder(1000)
+				options: strings.new_builder(100)
+				shared_types: strings.new_builder(100)
+				shared_functions: strings.new_builder(100)
+				channel_definitions: strings.new_builder(100)
+				json_forward_decls: strings.new_builder(100)
+				enum_typedefs: strings.new_builder(100)
+				sql_buf: strings.new_builder(100)
+				init: strings.new_builder(100)
+				cleanup: strings.new_builder(100)
+				table: global_g.table
+				pref: global_g.pref
+				fn_decl: 0
+				is_autofree: true
+				indent: -1
+				module_built: global_g.module_built
+				timers: local_timers
+				inner_loop: &ast.EmptyStmt{}
+			}
+
+			if g.pref.is_vlines {
+				g.vlines_path = util.vlines_escape_path(file.path, g.pref.ccompiler)
+			}
+			// println('\ncgen "$g.file.path" nr_stmts=$file.stmts.len')
+			// building_v := true && (g.file.path.contains('/vlib/') || g.file.path.contains('cmd/v'))
+			g.is_test = g.pref.is_test
+			if g.file.path == '' || !g.pref.autofree {
+				// cgen test or building V
+				// println('autofree=false')
+				g.is_autofree = false
+			} else {
+				g.is_autofree = true
+				global_g.autofree_used = true
+			}
+			// anon fn may include assert and thus this needs
+			// to be included before any test contents are written
+			if g.is_test && !global_g.tests_inited {
+				g.write_tests_definitions()
+				global_g.tests_inited = true
+			}
+			g.stmts(file.stmts)
+			// Transfer embedded files
+			if file.embedded_files.len > 0 {
+				for path in file.embedded_files {
+					if path !in g.embedded_files {
+						g.embedded_files << path
+					}
 				}
 			}
+			g.timers.show('cgen_file $file.path')
+			return g
 		}
-		g.timers.show('cgen_file $file.path')
+	)
+	// lock global_g {
+	pp.set_shared_context(global_g) // TODO: make global_g shared
+	//}
+	pp.work_on_items(files)
+	mut g := global_g
+	g.timers.start('cgen unification')
+	for tg in pp.get_results<Gen>() {
+		g.out.write(tg.out) or { panic(err) } // strings.Builder.write() never fails
+		g.cheaders.write(tg.cheaders) or { panic(err) }
+		g.includes.write(tg.includes) or { panic(err) }
+		g.typedefs.write(tg.typedefs) or { panic(err) }
+		g.typedefs2.write(tg.typedefs2) or { panic(err) }
+		g.type_definitions.write(tg.type_definitions) or { panic(err) }
+		g.definitions.write(tg.definitions) or { panic(err) }
+		g.gowrappers.write(tg.gowrappers) or { panic(err) }
+		g.stringliterals.write(tg.stringliterals) or { panic(err) }
+		g.auto_str_funcs.write(tg.auto_str_funcs) or { panic(err) }
+		g.comptime_defines.write(tg.comptime_defines) or { panic(err) }
+		g.pcs_declarations.write(tg.pcs_declarations) or { panic(err) }
+		g.hotcode_definitions.write(tg.hotcode_definitions) or { panic(err) }
+		g.embedded_data.write(tg.embedded_data) or { panic(err) }
+		g.shared_types.write(tg.shared_types) or { panic(err) }
+		g.shared_functions.write(tg.channel_definitions) or { panic(err) }
+		for styp, base in tg.optionals { // merge map
+			g.optionals[styp] = base
+		}
+		g.json_forward_decls.write(tg.json_forward_decls) or { panic(err) }
+		g.enum_typedefs.write(tg.enum_typedefs) or { panic(err) }
+		g.channel_definitions.write(tg.channel_definitions) or { panic(err) }
+		g.sql_buf.write(tg.sql_buf) or { panic(err) }
+
+		g.cleanups[tg.file.mod.name].write(tg.cleanup) or { panic(err) } // strings.Builder.write never fails; it is like that in the source
+		g.inits[tg.file.mod.name].write(tg.init) or { panic(err) }
+
+		g.threaded_fns << tg.threaded_fns
+		g.waiter_fns << tg.waiter_fns
+		g.auto_fn_definitions << tg.auto_fn_definitions
+		g.anon_fn_definitions << tg.anon_fn_definitions
+
+		for str_type in tg.str_types {
+			if str_type !in g.str_types {
+				g.str_types << str_type
+			}
+		}
+		for scf in tg.sumtype_casting_fns {
+			if scf !in g.sumtype_casting_fns {
+				g.sumtype_casting_fns << scf
+			}
+		}
+
+		g.has_main = g.has_main || tg.has_main
+		g.needed_equality_fns << tg.needed_equality_fns // duplicates are resolved later in gen_equality_fns
 	}
+
+	g.write_optionals()
+	g.dump_expr_definitions() // this uses gen_str_for_type, so it has to go before the below for loop
+	for str_type in g.str_types {
+		g.final_gen_str(str_type)
+	}
+	for sumtype_casting_fn in g.sumtype_casting_fns {
+		g.write_sumtype_casting_fn(sumtype_casting_fn)
+	}
+	g.gen_equality_fns()
+	g.timers.show('cgen unification')
 	g.timers.start('cgen common')
-	if autofree_used {
+	if global_g.autofree_used {
 		g.is_autofree = true // so that void _vcleanup is generated
 	}
 	// to make sure type idx's are the same in cached mods
@@ -290,7 +401,6 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		}
 	}
 	//
-	g.dump_expr_definitions()
 	// v files are finished, what remains is pure C code
 	g.gen_vlines_reset()
 	if g.pref.build_mode != .build_module {
@@ -344,10 +454,6 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	if g.embedded_data.len > 0 {
 		b.writeln('\n// V embedded data:')
 		b.write_string(g.embedded_data.str())
-	}
-	if g.options_typedefs.len > 0 {
-		b.writeln('\n// V option typedefs:')
-		b.write_string(g.options_typedefs.str())
 	}
 	if g.shared_functions.len > 0 {
 		b.writeln('\n// V shared type functions:')
@@ -562,17 +668,12 @@ pub fn (mut g Gen) write_typeof_functions() {
 
 // V type to C typecc
 fn (mut g Gen) typ(t ast.Type) string {
-	styp := g.base_type(t)
 	if t.has_flag(.optional) {
 		// Register an optional if it's not registered yet
 		return g.register_optional(t)
+	} else {
+		return g.base_type(t)
 	}
-	/*
-	if styp.starts_with('C__') {
-		return styp[3..]
-	}
-	*/
-	return styp
 }
 
 fn (mut g Gen) base_type(t ast.Type) string {
@@ -649,13 +750,15 @@ fn (g &Gen) optional_type_text(styp string, base string) string {
 
 fn (mut g Gen) register_optional(t ast.Type) string {
 	styp, base := g.optional_type_name(t)
-	if styp !in g.optionals {
-		g.typedefs2.writeln('typedef struct $styp $styp;')
-		g.options.write_string(g.optional_type_text(styp, base))
-		g.options.writeln(';\n')
-		g.optionals << styp.clone()
-	}
+	g.optionals[styp] = base
 	return styp
+}
+
+fn (mut g Gen) write_optionals() {
+	for styp, base in g.optionals {
+		g.typedefs2.writeln('typedef struct $styp $styp;')
+		g.options.write_string(g.optional_type_text(styp, base) + ';\n\n')
+	}
 }
 
 fn (mut g Gen) find_or_register_shared(t ast.Type, base string) string {
@@ -781,7 +884,7 @@ fn (g &Gen) type_sidx(t ast.Type) string {
 		sym := g.table.get_type_symbol(t)
 		return '_v_type_idx_${sym.cname}()'
 	}
-	return '$t.idx()'
+	return t.idx().str()
 }
 
 //
@@ -1811,18 +1914,35 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 	}
 }
 
-fn (mut g Gen) write_sumtype_casting_fn(got_ ast.Type, exp_ ast.Type) {
+struct SumtypeCastingFn {
+	fn_name string
+	got     ast.Type
+	exp     ast.Type
+}
+
+fn (mut g Gen) get_sumtype_casting_fn(got_ ast.Type, exp_ ast.Type) string {
 	got, exp := got_.idx(), exp_.idx()
 	i := got | (exp << 16)
+	got_cname, exp_cname := g.table.get_type_symbol(got).cname, g.table.get_type_symbol(exp).cname
+	fn_name := '${got_cname}_to_sumtype_$exp_cname'
 	if got == exp || g.sumtype_definitions[i] {
-		return
+		return fn_name
 	}
 	g.sumtype_definitions[i] = true
-	got_sym := g.table.get_type_symbol(got)
-	exp_sym := g.table.get_type_symbol(exp)
-	mut sb := strings.new_builder(128)
+	g.sumtype_casting_fns << SumtypeCastingFn{
+		fn_name: fn_name
+		got: got
+		exp: exp
+	}
+	return fn_name
+}
+
+fn (mut g Gen) write_sumtype_casting_fn(fun SumtypeCastingFn) {
+	got, exp := fun.got, fun.exp
+	got_sym, exp_sym := g.table.get_type_symbol(got), g.table.get_type_symbol(exp)
 	got_cname, exp_cname := got_sym.cname, exp_sym.cname
-	sb.writeln('static inline $exp_cname ${got_cname}_to_sumtype_${exp_cname}($got_cname* x) {')
+	mut sb := strings.new_builder(128)
+	sb.writeln('static inline $exp_cname ${fun.fn_name}($got_cname* x) {')
 	sb.writeln('\t$got_cname* ptr = memdup(x, sizeof($got_cname));')
 	sb.write_string('\treturn ($exp_cname){ ._$got_cname = ptr, ._typ = ${g.type_sidx(got)}')
 	for field in (exp_sym.info as ast.SumType).fields {
@@ -1864,7 +1984,6 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 	exp_sym := g.table.get_type_symbol(expected_type)
 	expected_is_ptr := expected_type.is_ptr()
 	got_is_ptr := got_type.is_ptr()
-	got_sym := g.table.get_type_symbol(got_type)
 	// allow using the new Error struct as a string, to avoid a breaking change
 	// TODO: temporary to allow people to migrate their code; remove soon
 	if got_type == ast.error_type_idx && expected_type == ast.string_type_idx {
@@ -1924,8 +2043,7 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 				g.prevent_sum_type_unwrapping_once = true
 				g.expr(expr)
 			} else {
-				g.write_sumtype_casting_fn(got_type, expected_type)
-				fname := '${got_sym.cname}_to_sumtype_$exp_sym.cname'
+				fname := g.get_sumtype_casting_fn(got_type, expected_type)
 				g.call_cfn_for_casting_expr(fname, expr, expected_is_ptr, exp_sym.cname,
 					got_is_ptr, got_styp)
 			}
@@ -3958,19 +4076,19 @@ fn (mut g Gen) match_expr_classic(node ast.MatchExpr, is_expr bool, cond_var str
 				}
 				match type_sym.kind {
 					.array {
-						ptr_typ := g.gen_array_equality_fn(node.cond_type)
+						ptr_typ := g.equality_fn(node.cond_type)
 						g.write('${ptr_typ}_arr_eq($cond_var, ')
 						g.expr(expr)
 						g.write(')')
 					}
 					.array_fixed {
-						ptr_typ := g.gen_fixed_array_equality_fn(node.cond_type)
+						ptr_typ := g.equality_fn(node.cond_type)
 						g.write('${ptr_typ}_arr_eq($cond_var, ')
 						g.expr(expr)
 						g.write(')')
 					}
 					.map {
-						ptr_typ := g.gen_map_equality_fn(node.cond_type)
+						ptr_typ := g.equality_fn(node.cond_type)
 						g.write('${ptr_typ}_map_eq($cond_var, ')
 						g.expr(expr)
 						g.write(')')
@@ -3981,7 +4099,7 @@ fn (mut g Gen) match_expr_classic(node ast.MatchExpr, is_expr bool, cond_var str
 						g.write(')')
 					}
 					.struct_ {
-						ptr_typ := g.gen_struct_equality_fn(node.cond_type)
+						ptr_typ := g.equality_fn(node.cond_type)
 						g.write('${ptr_typ}_struct_eq($cond_var, ')
 						g.expr(expr)
 						g.write(')')
@@ -5001,28 +5119,27 @@ fn (mut g Gen) const_decl_init_later(mod string, name string, expr ast.Expr, typ
 	g.definitions.writeln('$styp $cname; // inited later')
 	if cname == '_const_os__args' {
 		if g.pref.os == .windows {
-			g.inits[mod].writeln('\t_const_os__args = os__init_os_args_wide(___argc, (byteptr*)___argv);')
+			g.init.writeln('\t_const_os__args = os__init_os_args_wide(___argc, (byteptr*)___argv);')
 		} else {
-			g.inits[mod].writeln('\t_const_os__args = os__init_os_args(___argc, (byte**)___argv);')
+			g.init.writeln('\t_const_os__args = os__init_os_args(___argc, (byte**)___argv);')
 		}
 	} else {
 		if unwrap_option {
-			g.inits[mod].writeln(g.expr_string_surround('\t$cname = *($styp*)', expr,
-				'.data;'))
+			g.init.writeln(g.expr_string_surround('\t$cname = *($styp*)', expr, '.data;'))
 		} else {
-			g.inits[mod].writeln(g.expr_string_surround('\t$cname = ', expr, ';'))
+			g.init.writeln(g.expr_string_surround('\t$cname = ', expr, ';'))
 		}
 	}
 	if g.is_autofree {
 		sym := g.table.get_type_symbol(typ)
 		if styp.starts_with('Array_') {
-			g.cleanups[mod].writeln('\tarray_free(&$cname);')
+			g.cleanup.writeln('\tarray_free(&$cname);')
 		} else if styp == 'string' {
-			g.cleanups[mod].writeln('\tstring_free(&$cname);')
+			g.cleanup.writeln('\tstring_free(&$cname);')
 		} else if sym.kind == .map {
-			g.cleanups[mod].writeln('\tmap_free(&$cname);')
+			g.cleanup.writeln('\tmap_free(&$cname);')
 		} else if styp == 'IError' {
-			g.cleanups[mod].writeln('\tIError_free(&$cname);')
+			g.cleanup.writeln('\tIError_free(&$cname);')
 		}
 	}
 }
@@ -5347,8 +5464,11 @@ fn (mut g Gen) write_init_function() {
 		return
 	}
 	fn_vinit_start_pos := g.out.len
+	g.writeln(segfault_handler)
 	// ___argv is declared as voidptr here, because that unifies the windows/unix logic
 	g.writeln('void _vinit(int ___argc, voidptr ___argv) {')
+
+	g.writeln('signal(SIGSEGV, v_segmentation_fault_handler);')
 	if g.pref.prealloc {
 		g.writeln('prealloc_vinit();')
 	}
@@ -5504,7 +5624,7 @@ fn (mut g Gen) write_types(types []ast.TypeSymbol) {
 							if styp !in g.optionals {
 								last_text := g.type_definitions.after(start_pos).clone()
 								g.type_definitions.go_back_to(start_pos)
-								g.optionals << styp
+								g.optionals[styp] = base
 								g.typedefs2.writeln('typedef struct $styp $styp;')
 								g.type_definitions.writeln('${g.optional_type_text(styp,
 									base)};')

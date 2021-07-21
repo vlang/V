@@ -21,11 +21,13 @@ fn main() {
 		println('fast.html generator needs to be located in `v/cmd/tools/fast`')
 	}
 	println('fast.html generator\n')
-	println('Fetching updates...')
-	ret := os.system('$vdir/v up')
-	if ret != 0 {
-		println('failed to update V')
-		return
+	if !os.args.contains('-noupdate') {
+		println('Fetching updates...')
+		ret := os.system('$vdir/v up')
+		if ret != 0 {
+			println('failed to update V')
+			return
+		}
 	}
 	// Fetch the last commit's hash
 	commit := exec('git rev-parse HEAD')[..8]
@@ -36,7 +38,6 @@ fn main() {
 	if table.contains('>$commit<') {
 		println('nothing to benchmark')
 		exit(1)
-		return
 	}
 	// for i, commit in commits {
 	message := exec('git log --pretty=format:"%s" -n1 $commit')
@@ -47,7 +48,7 @@ fn main() {
 	// exec('git checkout $commit')
 	println('  Building vprod...')
 	os.chdir(vdir)
-	exec('$vdir/v -o $vdir/vprod -prod -prealloc cmd/v')
+	exec('$vdir/v -o $vdir/vprod -prod cmd/v')
 	// exec('v -o $vdir/vprod $vdir/cmd/v') // for faster debugging
 	// cache vlib modules
 	exec('$vdir/v wipe-cache')

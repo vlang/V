@@ -420,6 +420,18 @@ static void* g_live_info = NULL;
 #endif
 '
 
+const segfault_handler = '
+void v_segmentation_fault_handler(int sig) {
+  void *array[40];
+  
+  size_t size = backtrace(array, 40);
+
+  fprintf(stderr, "Error: signal %d:", sig);
+  backtrace_symbols_fd(array, size, STDERR_FILENO);
+  exit(1);
+}
+'
+
 const c_builtin_types = '
 //================================== builtin types ================================*/
 typedef int64_t i64;
